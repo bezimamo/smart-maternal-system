@@ -9,9 +9,20 @@ import * as bcrypt from 'bcrypt';
 @Injectable()
 export class UsersService {
   constructor(@InjectModel(User.name) private userModel: Model<UserDocument>) {}
+  private readonly hospitalManagedRoles = [
+    'DOCTOR',
+    'NURSE',
+    'MIDWIFE',
+    'DISPATCHER',
+    'LIAISON_OFFICER',
+    'HOSPITAL_APPROVER',
+    'GATEKEEPER',
+    'SPECIALIST',
+  ];
 
   async create(createUserDto: CreateUserDto): Promise<User> {
-    const { email, password, role, hospitalId, woredaId, ...userData } = createUserDto;
+    const { email, password, role, hospitalId, healthCenterId, woredaId, ...userData } = createUserDto;
+    const selectedHospitalId = hospitalId ?? healthCenterId;
 
     // Check if user already exists
     const existingUser = await this.userModel.findOne({ email });
@@ -27,39 +38,40 @@ export class UsersService {
       email,
       password: hashedPassword,
       role,
-      hospitalId: hospitalId ? new Types.ObjectId(hospitalId) : undefined,
+      hospitalId: selectedHospitalId ? new Types.ObjectId(selectedHospitalId) : undefined,
       woredaId: woredaId ? new Types.ObjectId(woredaId) : undefined,
     });
 
     return user.save();
   }
 
-  async createWithRoleValidation(createUserDto: CreateUserDto, creatorRole: string, creatorHospitalId?: string): Promise<User> {
-    const { role: newRole, hospitalId, woredaId } = createUserDto;
+  async createWithRoleValidation(
+    createUserDto: CreateUserDto,
+    creatorRole: string,
+    creatorHospitalId?: string,
+    creatorWoredaId?: string,
+  ): Promise<User> {
+    const { role: newRole } = createUserDto;
 
-    // Role-based creation permissions
-    if (creatorRole === 'HOSPITAL_ADMIN') {
-      // Hospital Admin must have a hospitalId to create users
+    if (creatorRole === 'HOSPITAL_ADMIN' || creatorRole === 'HEALTH_CENTER_ADMIN') {
       if (!creatorHospitalId) {
-        throw new BadRequestException('Hospital Admin must be assigned to a hospital to create users');
+        throw new BadRequestException(`${creatorRole} must be assigned to a facility to create users`);
       }
-      
-      // Hospital Admin can only create workers for his own hospital
-      if (['DOCTOR', 'NURSE', 'DISPATCHER'].includes(newRole)) {
-        if (!hospitalId || hospitalId !== creatorHospitalId) {
-          throw new BadRequestException(`Hospital Admin can only create workers for their own hospital. Provided hospitalId: ${hospitalId}, Creator hospitalId: ${creatorHospitalId}`);
-        }
-      } else if (newRole === 'HOSPITAL_ADMIN') {
-        throw new BadRequestException('Hospital Admin cannot create other Hospital Admins');
-      } else if (['SUPER_ADMIN', 'WOREDA_ADMIN'].includes(newRole)) {
-        throw new BadRequestException('Hospital Admin cannot create Super Admins or Woreda Admins');
+      if (this.hospitalManagedRoles.includes(newRole)) {
+        // Force hospital and woreda from the creator — ignore whatever the frontend sent
+        const dto = {
+          ...createUserDto,
+          hospitalId: creatorHospitalId,
+          woredaId: creatorWoredaId ?? createUserDto.woredaId,
+        };
+        return this.create(dto);
+      } else if (['HOSPITAL_ADMIN', 'HEALTH_CENTER_ADMIN', 'SUPER_ADMIN', 'WOREDA_ADMIN', 'SYSTEM_ADMIN'].includes(newRole)) {
+        throw new BadRequestException(`${creatorRole} cannot create admin users`);
       }
     } else if (creatorRole === 'WOREDA_ADMIN') {
-      // Woreda Admin cannot create any users (as per requirement)
       throw new BadRequestException('Woreda Admin cannot create users');
     }
 
-    // Proceed with normal creation
     return this.create(createUserDto);
   }
 
@@ -177,8 +189,8 @@ export class UsersService {
     // Role-based update permissions
     if (creatorRole === 'HOSPITAL_ADMIN') {
       // Hospital Admin can only update workers for his own hospital
-      if (!['DOCTOR', 'NURSE', 'DISPATCHER'].includes(userToUpdate.role)) {
-        throw new BadRequestException('Hospital Admin can only update workers (DOCTOR, NURSE, DISPATCHER)');
+      if (!this.hospitalManagedRoles.includes(userToUpdate.role)) {
+        throw new BadRequestException('Hospital Admin can only update hospital staff users');
       }
       if (userToUpdate.hospitalId?.toString() !== creatorHospitalId) {
         throw new BadRequestException('Hospital Admin can only update workers in their own hospital');
@@ -190,6 +202,62 @@ export class UsersService {
     }
 
     return this.update(id, updateUserDto);
+  }
+
+  async getOwnProfile(id: string): Promise<any> {
+    const user = await this.userModel
+      .findById(id)
+      .select('-password')
+      .populate({ path: 'hospitalId', populate: { path: 'woredaId' } })
+      .populate('woredaId')
+      .exec();
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+
+    const userObj: any = (user as any).toObject();
+
+    // If woredaId is not directly set on the user but their hospital has one, derive it
+    if (!userObj.woredaId && userObj.hospitalId?.woredaId) {
+      userObj.woredaId = userObj.hospitalId.woredaId;
+    }
+
+    // If assignedRegion is not set but hospital's woreda has a region/city, derive it
+    if (!userObj.assignedRegion && userObj.woredaId?.city) {
+      userObj.assignedRegion = userObj.woredaId.city;
+    }
+
+    return userObj;
+  }
+
+  async updateSelf(
+    id: string,
+    data: { name?: string; email?: string; phoneNumber?: string; currentPassword?: string; newPassword?: string },
+  ): Promise<User> {
+    const user = await this.userModel.findById(id);
+    if (!user) throw new NotFoundException('User not found');
+
+    const updateData: any = {};
+
+    if (data.name) updateData.name = data.name;
+    if (data.phoneNumber !== undefined) updateData.phoneNumber = data.phoneNumber;
+
+    if (data.email && data.email !== user.email) {
+      const taken = await this.userModel.findOne({ email: data.email });
+      if (taken) throw new ConflictException('Email already in use');
+      updateData.email = data.email;
+    }
+
+    if (data.newPassword) {
+      if (!data.currentPassword) {
+        throw new BadRequestException('Current password is required to set a new password');
+      }
+      const isMatch = await bcrypt.compare(data.currentPassword, user.password);
+      if (!isMatch) throw new BadRequestException('Current password is incorrect');
+      updateData.password = await bcrypt.hash(data.newPassword, 10);
+    }
+
+    return this.userModel.findByIdAndUpdate(id, updateData, { new: true }).select('-password').populate('hospitalId').populate('woredaId').exec();
   }
 
   async delete(id: string): Promise<void> {
@@ -209,8 +277,8 @@ export class UsersService {
     // Role-based delete permissions
     if (creatorRole === 'HOSPITAL_ADMIN') {
       // Hospital Admin can only delete workers for his own hospital
-      if (!['DOCTOR', 'NURSE', 'DISPATCHER'].includes(userToDelete.role)) {
-        throw new BadRequestException('Hospital Admin can only delete workers (DOCTOR, NURSE, DISPATCHER)');
+      if (!this.hospitalManagedRoles.includes(userToDelete.role)) {
+        throw new BadRequestException('Hospital Admin can only delete hospital staff users');
       }
       if (userToDelete.hospitalId?.toString() !== creatorHospitalId) {
         throw new BadRequestException('Hospital Admin can only delete workers in their own hospital');

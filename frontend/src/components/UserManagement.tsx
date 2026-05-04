@@ -28,6 +28,7 @@ export function UserManagement() {
   const [editingUser, setEditingUser] = useState<User | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [roleFilter, setRoleFilter] = useState('');
+  const [visibleCount, setVisibleCount] = useState(10);
 
   useEffect(() => {
     fetchUsers();
@@ -40,6 +41,11 @@ export function UserManagement() {
       const response = await api.getUsers();
       setAllUsers(Array.isArray(response) ? response : []);
     } catch (err: any) {
+      // 403 = role not allowed to list users — show empty list silently
+      if (err?.message === 'Forbidden resource') {
+        setAllUsers([]);
+        return;
+      }
       setError(err.message || 'Failed to fetch users');
     } finally {
       setLoading(false);
@@ -69,6 +75,12 @@ export function UserManagement() {
       
       case 'HOSPITAL_ADMIN':
         // Hospital Admin can only see users in their hospital
+        return allUsers.filter(u => 
+          (u.hospitalId && typeof u.hospitalId === 'string' && u.hospitalId === user.hospitalId)
+        );
+      
+      case 'HEALTH_CENTER_ADMIN':
+        // Health Center Admin can only see users in their health center
         return allUsers.filter(u => 
           (u.hospitalId && typeof u.hospitalId === 'string' && u.hospitalId === user.hospitalId)
         );
@@ -155,6 +167,34 @@ export function UserManagement() {
     return '-';
   };
 
+  const getFacilityAndWoredaInfo = (user: User) => {
+    const hospitalName = getHospitalName(user.hospitalId);
+    const woredaName = user.assignedRegion || getWoredaFromHospital(user) || getWoredaName(user.woredaId) || '-';
+    
+    // If no facility assigned, just show woreda
+    if (hospitalName === '-') {
+      return woredaName === '-' ? '-' : woredaName;
+    }
+    
+    // If no woreda assigned, just show facility
+    if (woredaName === '-') {
+      return hospitalName;
+    }
+    
+    // Show both facility and woreda together
+    return `${hospitalName} • ${woredaName}`;
+  };
+
+  const getFacilityType = (user: User) => {
+    if (!user.hospitalId) return null;
+    
+    const hospital = hospitals.find(h => h._id === user.hospitalId);
+    if (!hospital) return null;
+    
+    const type = String(hospital?.type ?? '').trim().toUpperCase().replace(/\s+/g, '_');
+    return type === 'HEALTH_CENTER' ? 'Health Center' : 'Hospital';
+  };
+
   // Check if current user can edit/delete a specific user
   const canEditUser = (targetUser: User) => {
     if (!user) return false;
@@ -197,6 +237,10 @@ export function UserManagement() {
         // Can edit users in their hospital
         return (targetUser.hospitalId && typeof targetUser.hospitalId === 'string' && targetUser.hospitalId === user.hospitalId);
       
+      case 'HEALTH_CENTER_ADMIN':
+        // Can edit users in their health center
+        return (targetUser.hospitalId && typeof targetUser.hospitalId === 'string' && targetUser.hospitalId === user.hospitalId);
+      
       default:
         // Other roles can only edit themselves
         return targetUser._id === user.id;
@@ -217,6 +261,10 @@ export function UserManagement() {
     return matchesSearch && matchesRole;
   });
 
+  const visibleUsers = filteredUsers.slice(0, visibleCount);
+  const hasMore = visibleCount < filteredUsers.length;
+  const hasLess = visibleCount > 10;
+
   const getRoleBadgeColor = (role: string) => {
     switch (role) {
       case 'SUPER_ADMIN': return 'bg-purple-100 text-purple-800';
@@ -228,6 +276,10 @@ export function UserManagement() {
       case 'MIDWIFE': return 'bg-indigo-100 text-indigo-800';
       case 'DISPATCHER': return 'bg-orange-100 text-orange-800';
       case 'EMERGENCY_ADMIN': return 'bg-red-100 text-red-800';
+      case 'LIAISON_OFFICER': return 'bg-cyan-100 text-cyan-800';
+      case 'HOSPITAL_APPROVER': return 'bg-teal-100 text-teal-800';
+      case 'GATEKEEPER': return 'bg-amber-100 text-amber-800';
+      case 'SPECIALIST': return 'bg-violet-100 text-violet-800';
       case 'MOTHER': return 'bg-gray-100 text-gray-800';
       default: return 'bg-gray-100 text-gray-800';
     }
@@ -243,12 +295,12 @@ export function UserManagement() {
 
   return (
     <div className="bg-white rounded-lg shadow">
-      <div className="p-6 border-b border-gray-200">
-        <div className="flex justify-between items-center mb-4">
-          <h2 className="text-xl font-semibold text-gray-900">User Management</h2>
+      <div className="p-4 sm:p-6 border-b border-gray-200">
+        <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3 mb-4">
+          <h2 className="text-lg sm:text-xl font-semibold text-gray-900">User Management</h2>
           <button
             onClick={() => setShowAddUser(true)}
-            className="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition-colors duration-200"
+            className="w-full sm:w-auto bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition-colors duration-200"
           >
             Add New User
           </button>
@@ -259,12 +311,12 @@ export function UserManagement() {
             type="text"
             placeholder="Search users..."
             value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
+            onChange={(e) => { setSearchTerm(e.target.value); setVisibleCount(10); }}
             className="flex-1 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
           />
           <select
             value={roleFilter}
-            onChange={(e) => setRoleFilter(e.target.value)}
+            onChange={(e) => { setRoleFilter(e.target.value); setVisibleCount(10); }}
             className="px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
           >
             <option value="">All Roles</option>
@@ -272,11 +324,16 @@ export function UserManagement() {
             <option value="SYSTEM_ADMIN">System Admin</option>
             <option value="WOREDA_ADMIN">Woreda Admin</option>
             <option value="HOSPITAL_ADMIN">Hospital Admin</option>
+            <option value="HEALTH_CENTER_ADMIN">Health Center Admin</option>
             <option value="DOCTOR">Doctor</option>
             <option value="NURSE">Nurse</option>
             <option value="MIDWIFE">Midwife</option>
             <option value="DISPATCHER">Dispatcher</option>
             <option value="EMERGENCY_ADMIN">Emergency Admin</option>
+            <option value="LIAISON_OFFICER">Liaison Officer</option>
+            <option value="HOSPITAL_APPROVER">Hospital Approver</option>
+            <option value="GATEKEEPER">Gatekeeper</option>
+            <option value="SPECIALIST">Specialist</option>
             <option value="MOTHER">Mother</option>
           </select>
         </div>
@@ -289,7 +346,7 @@ export function UserManagement() {
       )}
 
       <div className="overflow-x-auto">
-        <table className="w-full">
+        <table className="min-w-[900px] w-full">
           <thead className="bg-gray-50">
             <tr>
               <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
@@ -302,10 +359,7 @@ export function UserManagement() {
                 Role
               </th>
               <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                Hospital
-              </th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                Woreda/Region
+                Facility & Location
               </th>
               <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                 Phone
@@ -319,7 +373,7 @@ export function UserManagement() {
             </tr>
           </thead>
           <tbody className="bg-white divide-y divide-gray-200">
-            {filteredUsers.map((user) => (
+            {visibleUsers.map((user) => (
               <tr key={user._id} className="hover:bg-gray-50">
                 <td className="px-6 py-4 whitespace-nowrap">
                   <div className="text-sm font-medium text-gray-900">{user.name}</div>
@@ -333,14 +387,14 @@ export function UserManagement() {
                   </span>
                 </td>
                 <td className="px-6 py-4 whitespace-nowrap">
-                  <div className="text-sm text-gray-500">
-                    {getHospitalName(user.hospitalId)}
+                  <div className="text-sm text-gray-900">
+                    {getFacilityAndWoredaInfo(user)}
                   </div>
-                </td>
-                <td className="px-6 py-4 whitespace-nowrap">
-                  <div className="text-sm text-gray-500">
-                    {user.assignedRegion || getWoredaFromHospital(user) || getWoredaName(user.woredaId) || '-'}
-                  </div>
+                  {getFacilityType(user) && (
+                    <div className="text-xs text-gray-500 mt-1">
+                      {getFacilityType(user)}
+                    </div>
+                  )}
                 </td>
                 <td className="px-6 py-4 whitespace-nowrap">
                   <div className="text-sm text-gray-500">{user.phoneNumber || '-'}</div>
@@ -379,6 +433,34 @@ export function UserManagement() {
         {filteredUsers.length === 0 && (
           <div className="text-center py-8">
             <p className="text-gray-500">No users found</p>
+          </div>
+        )}
+
+        {/* Pagination footer */}
+        {filteredUsers.length > 0 && (
+          <div className="px-6 py-4 border-t border-gray-200 flex items-center justify-between">
+            <p className="text-sm text-gray-500">
+              Showing <span className="font-medium">{visibleUsers.length}</span> of{' '}
+              <span className="font-medium">{filteredUsers.length}</span> users
+            </p>
+            <div className="flex gap-2">
+              {hasLess && (
+                <button
+                  onClick={() => setVisibleCount((c) => Math.max(10, c - 10))}
+                  className="px-4 py-2 text-sm border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50 transition-colors"
+                >
+                  Show Less
+                </button>
+              )}
+              {hasMore && (
+                <button
+                  onClick={() => setVisibleCount((c) => c + 10)}
+                  className="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+                >
+                  Show More ({filteredUsers.length - visibleCount} remaining)
+                </button>
+              )}
+            </div>
           </div>
         )}
       </div>

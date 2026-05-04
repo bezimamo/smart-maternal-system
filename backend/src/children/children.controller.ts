@@ -45,6 +45,39 @@ export class ChildrenController {
     );
   }
 
+  // ── Woreda-specific: birth certificate workflow ─────────────────────────────
+  @Roles('SUPER_ADMIN', 'SYSTEM_ADMIN', 'WOREDA_ADMIN')
+  @Get('woreda/:woredaId')
+  @ApiOperation({ summary: 'Get all children in a woreda (for birth certificate workflow)' })
+  @ApiParam({ name: 'woredaId', description: 'Woreda ID' })
+  @ApiResponse({ status: 200, description: 'Children retrieved successfully' })
+  async findByWoreda(@Param('woredaId') woredaId: string, @Request() req) {
+    const user = req.user;
+    const targetWoreda = user.role === 'WOREDA_ADMIN'
+      ? user.woredaId?.toString()
+      : woredaId;
+    return this.childrenService.findByWoreda(targetWoreda);
+  }
+
+  @Roles('WOREDA_ADMIN', 'SUPER_ADMIN', 'SYSTEM_ADMIN')
+  @Patch(':id/issue-certificate')
+  @ApiOperation({ summary: 'Issue birth certificate for a child' })
+  @ApiParam({ name: 'id', description: 'Child ID' })
+  @ApiResponse({ status: 200, description: 'Birth certificate issued successfully' })
+  async issueCertificate(
+    @Param('id') id: string,
+    @Body() body: { fatherName?: string; fatherPhone?: string; birthLocation?: string },
+    @Request() req,
+  ) {
+    const user = req.user;
+    return this.childrenService.issueBirthCertificate(
+      id,
+      user.role,
+      user.woredaId?.toString(),
+      body,
+    );
+  }
+
   @Roles('SUPER_ADMIN', 'SYSTEM_ADMIN', 'WOREDA_ADMIN', 'HOSPITAL_ADMIN', 'DOCTOR', 'NURSE', 'MIDWIFE')
   @Get('search')
   @ApiOperation({ summary: 'Search children by name or mother information' })
@@ -135,6 +168,24 @@ export class ChildrenController {
       updateChildDto,
       user.role,
       user.hospitalId?.toString()
+    );
+  }
+
+  @Roles('SUPER_ADMIN', 'SYSTEM_ADMIN', 'WOREDA_ADMIN')
+  @Patch(':id/verify')
+  @ApiOperation({ summary: 'Verify child registration for official documentation' })
+  @ApiParam({ name: 'id', description: 'Child ID' })
+  @ApiResponse({ status: 200, description: 'Child verification status updated successfully' })
+  @ApiResponse({ status: 400, description: 'Bad Request' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({ status: 403, description: 'Forbidden - Insufficient permissions' })
+  @ApiResponse({ status: 404, description: 'Child not found' })
+  async verifyChild(@Param('id') id: string, @Request() req) {
+    const user = req.user;
+    return this.childrenService.verifyChild(
+      id,
+      user.role,
+      user.woredaId?.toString()
     );
   }
 

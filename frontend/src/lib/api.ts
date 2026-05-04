@@ -2,13 +2,41 @@
 
 export const API_BASE = '/api/proxy';
 
+export class UnauthorizedError extends Error {
+  constructor() {
+    super('Unauthorized');
+    this.name = 'UnauthorizedError';
+  }
+}
+
 export async function handleResponse(response: Response) {
   const text = await response.text();
-  const data = text ? JSON.parse(text) : null;
+
+  // Try to parse as JSON
+  let data: any = null;
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      // Not JSON — treat as plain string (strip surrounding quotes if present)
+      data = text.replace(/^"|"$/g, '');
+    }
+  }
+
   if (!response.ok) {
-    const message = data?.message || data?.error || response.statusText || 'Request failed';
+    if (response.status === 401) throw new UnauthorizedError();
+    // Extract a human-readable message from whatever the backend returned
+    const message =
+      (typeof data === 'object' && data !== null
+        ? data?.message || data?.error
+        : typeof data === 'string' && data.length < 200
+          ? data
+          : null) ||
+      response.statusText ||
+      'Request failed';
     throw new Error(message);
   }
+
   return data;
 }
 
@@ -31,6 +59,16 @@ export const api = {
   // Users
   getUsers: () =>
     fetch(`${API_BASE}/users`).then(handleResponse),
+
+  getMe: () =>
+    fetch(`${API_BASE}/users/me`).then(handleResponse),
+
+  updateMe: (data: { name?: string; email?: string; phoneNumber?: string; currentPassword?: string; newPassword?: string }) =>
+    fetch(`${API_BASE}/users/me`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    }).then(handleResponse),
 
   getUser: (id: string) =>
     fetch(`${API_BASE}/users/${id}`).then(handleResponse),
@@ -62,9 +100,21 @@ export const api = {
   getHospitals: () =>
     fetch(`${API_BASE}/hospitals`).then(handleResponse),
 
+  getHospital: (id: string) =>
+    fetch(`${API_BASE}/hospitals/${id}`).then(handleResponse),
+
   createHospital: (data: any) =>
     fetch(`${API_BASE}/hospitals`, {
       method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(data),
+    }).then(handleResponse),
+
+  updateHospital: (id: string, data: any) =>
+    fetch(`${API_BASE}/hospitals/${id}`, {
+      method: 'PATCH',
       headers: {
         'Content-Type': 'application/json',
       },
@@ -80,9 +130,21 @@ export const api = {
   getWoredas: () =>
     fetch(`${API_BASE}/woredas`).then(handleResponse),
 
+  getWoreda: (id: string) =>
+    fetch(`${API_BASE}/woredas/${id}`).then(handleResponse),
+
   createWoreda: (data: any) =>
     fetch(`${API_BASE}/woredas`, {
       method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(data),
+    }).then(handleResponse),
+
+  updateWoreda: (id: string, data: any) =>
+    fetch(`${API_BASE}/woredas/${id}`, {
+      method: 'PATCH',
       headers: {
         'Content-Type': 'application/json',
       },

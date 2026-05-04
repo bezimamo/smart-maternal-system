@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
+import { useAuth } from '@/contexts/AuthContext';
 import { api } from '@/lib/api';
 
 export interface UserForEdit {
@@ -16,13 +17,9 @@ export interface UserForEdit {
 interface AddUserFormProps {
   onClose: () => void;
   onSuccess: () => void;
-  /** If defined, form will edit the given user instead of creating a new one */
   userToEdit?: UserForEdit;
-  /** Override which roles are available in the role dropdown */
   allowedRoles?: string[];
-  /** Hide the hospital selector (useful for hospital admins) */
   hideHospitalSelect?: boolean;
-  /** Force the created/updated user to use this hospital ID (used when hideHospitalSelect=true) */
   fixedHospitalId?: string;
 }
 
@@ -36,6 +33,33 @@ interface AddUserFormValues {
   phoneNumber?: string;
 }
 
+const HOSPITAL_SCOPED_ROLES = [
+  'HOSPITAL_ADMIN',
+  'HEALTH_CENTER_ADMIN',
+  'DOCTOR',
+  'NURSE',
+  'MIDWIFE',
+  'DISPATCHER',
+  'LIAISON_OFFICER',
+  'HOSPITAL_APPROVER',
+  'GATEKEEPER',
+  'SPECIALIST',
+];
+
+const extractWoredaId = (facility: any): string => {
+  const rawWoreda = facility?.woreda ?? facility?.woredaId;
+  if (!rawWoreda) return '';
+  if (typeof rawWoreda === 'string') return rawWoreda;
+  if (typeof rawWoreda === 'object') {
+    return rawWoreda._id?.toString?.() ?? rawWoreda.id?.toString?.() ?? rawWoreda.toString?.() ?? '';
+  }
+  return rawWoreda.toString();
+};
+
+const normalizeFacilityType = (facility: any): string => {
+  return String(facility?.type ?? '').trim().toUpperCase().replace(/\s+/g, '_');
+};
+
 export function AddUserForm({
   onClose,
   onSuccess,
@@ -44,24 +68,55 @@ export function AddUserForm({
   hideHospitalSelect,
   fixedHospitalId,
 }: AddUserFormProps) {
+  const { user: authUser } = useAuth();
+
+  const isSuperAdmin = authUser?.role === 'SUPER_ADMIN';
+  const isFacilityAdmin =
+    authUser?.role === 'HOSPITAL_ADMIN' || authUser?.role === 'HEALTH_CENTER_ADMIN';
+  // Roles that can assign a woreda to WOREDA_ADMIN
+  const canAssignWoreda = isSuperAdmin || authUser?.role === 'SYSTEM_ADMIN' || authUser?.role === 'MOH_ADMIN';
+
   const [formData, setFormData] = useState<AddUserFormValues>({
     email: '',
     password: '',
     name: '',
     role: allowedRoles?.[0] ?? 'DOCTOR',
-    hospitalId: fixedHospitalId ?? '',
-    woredaId: '',
+    hospitalId: fixedHospitalId ?? (isFacilityAdmin ? (authUser?.hospitalId ?? '') : ''),
+    woredaId: isFacilityAdmin ? (authUser?.woredaId ?? '') : '',
     phoneNumber: '',
   });
-  const [hospitals, setHospitals] = useState([]);
-  const [woredas, setWoredas] = useState([]);
+  const [hospitals, setHospitals] = useState<any[]>([]);
+  const [filteredHospitals, setFilteredHospitals] = useState<any[]>([]);
+  const [woredas, setWoredas] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
   useEffect(() => {
-    api.getHospitals().then(setHospitals).catch(console.error);
-    api.getWoredas().then(setWoredas).catch(console.error);
-  }, []);
+    if (isSuperAdmin) {
+      api.getHospitals().then((data) => {
+        setHospitals(data);
+        setFilteredHospitals(data);
+      }).catch(console.error);
+    }
+    // Fetch woredas for anyone who can assign a woreda (SUPER_ADMIN, SYSTEM_ADMIN, MOH_ADMIN)
+    if (canAssignWoreda) {
+      api.getWoredas().then(setWoredas).catch(console.error);
+    }
+  }, [isSuperAdmin, canAssignWoreda]);
+
+  // Auto-assign woreda from hospital (super admin only)
+  useEffect(() => {
+    if (!isSuperAdmin) return;
+    if (formData.hospitalId && hospitals.length > 0 && woredas.length > 0) {
+      const selectedHospital = hospitals.find((h: any) => h._id?.toString() === formData.hospitalId);
+      if (selectedHospital) {
+        const hospitalWoredaId = extractWoredaId(selectedHospital);
+        if (hospitalWoredaId && formData.woredaId !== hospitalWoredaId) {
+          setFormData(prev => ({ ...prev, woredaId: hospitalWoredaId }));
+        }
+      }
+    }
+  }, [formData.hospitalId, hospitals, woredas, isSuperAdmin]);
 
   useEffect(() => {
     if (userToEdit) {
@@ -84,6 +139,39 @@ export function AddUserForm({
     }
   }, [userToEdit, fixedHospitalId, allowedRoles]);
 
+  const handleWoredaChange = (woredaId: string) => {
+    setFormData(prev => ({ ...prev, woredaId }));
+    if (woredaId) {
+      const hospitalsInWoreda = hospitals.filter((h: any) => extractWoredaId(h) === woredaId);
+      setFilteredHospitals(hospitalsInWoreda);
+      if (formData.hospitalId && !hospitalsInWoreda.find(h => h._id?.toString() === formData.hospitalId)) {
+        setFormData(prev => ({ ...prev, hospitalId: '' }));
+      }
+    } else {
+      setFilteredHospitals(hospitals);
+    }
+  };
+
+  const handleHospitalChange = (hospitalId: string) => {
+    if (!hospitalId) {
+      setFormData(prev => ({ ...prev, hospitalId: '' }));
+      return;
+    }
+    const selectedHospital = hospitals.find((h: any) => h._id?.toString() === hospitalId);
+    if (selectedHospital) {
+      const hospitalWoredaId = extractWoredaId(selectedHospital);
+      const hospitalsInWoreda = hospitalWoredaId
+        ? hospitals.filter((h: any) => extractWoredaId(h) === hospitalWoredaId)
+        : hospitals;
+      setFilteredHospitals(hospitalsInWoreda);
+      setFormData(prev => ({
+        ...prev,
+        hospitalId,
+        woredaId: hospitalWoredaId || prev.woredaId,
+      }));
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
@@ -91,16 +179,25 @@ export function AddUserForm({
 
     try {
       const dataToSend: any = { ...formData };
-      if (!['HOSPITAL_ADMIN', 'DOCTOR', 'NURSE', 'DISPATCHER'].includes(formData.role)) {
+
+      if (!isSuperAdmin && isFacilityAdmin) {
+        dataToSend.hospitalId = authUser?.hospitalId;
+        dataToSend.woredaId = authUser?.woredaId;
+      }
+
+      if (!HOSPITAL_SCOPED_ROLES.includes(formData.role)) {
         delete dataToSend.hospitalId;
       }
-      if (!['WOREDA_ADMIN', 'HOSPITAL_ADMIN'].includes(formData.role)) {
+      // Keep woredaId for WOREDA_ADMIN, HOSPITAL_ADMIN, HEALTH_CENTER_ADMIN; strip for others
+      if (!['WOREDA_ADMIN', 'HOSPITAL_ADMIN', 'HEALTH_CENTER_ADMIN'].includes(formData.role)) {
         delete dataToSend.woredaId;
       }
 
-      // If hospital is fixed, ensure it's included even if not in form
-      if (fixedHospitalId) {
-        dataToSend.hospitalId = fixedHospitalId;
+      // Validate WOREDA_ADMIN has a woreda selected
+      if (formData.role === 'WOREDA_ADMIN' && !dataToSend.woredaId) {
+        setError('Please select a woreda for the Woreda Admin.');
+        setLoading(false);
+        return;
       }
 
       if (userToEdit?._id) {
@@ -119,20 +216,31 @@ export function AddUserForm({
   };
 
   const defaultRoles = [
-    'MOH_ADMIN',
+    'SYSTEM_ADMIN',
     'WOREDA_ADMIN',
     'HOSPITAL_ADMIN',
+    'HEALTH_CENTER_ADMIN',
     'DOCTOR',
+    'LIAISON_OFFICER',
+    'HOSPITAL_APPROVER',
+    'SPECIALIST',
+    'GATEKEEPER',
     'NURSE',
+    'MIDWIFE',
     'DISPATCHER',
+    'EMERGENCY_ADMIN',
     'MOTHER',
   ];
 
   const roles = allowedRoles && allowedRoles.length > 0 ? allowedRoles : defaultRoles;
+  const isHealthCenterAdminRole = formData.role === 'HEALTH_CENTER_ADMIN';
+  const facilityOptions = isHealthCenterAdminRole
+    ? filteredHospitals.filter((h: any) => normalizeFacilityType(h) === 'HEALTH_CENTER')
+    : filteredHospitals;
 
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4">
-      <div className="bg-white rounded-lg p-6 w-full max-w-md">
+    <div className="fixed inset-0 z-50 bg-black bg-opacity-50 flex items-center justify-center p-3 sm:p-4">
+      <div className="bg-white rounded-lg p-4 sm:p-6 w-full max-w-md max-h-[90vh] overflow-y-auto">
         <h2 className="text-xl font-bold mb-4">
           {userToEdit ? 'Edit User' : 'Add New User'}
         </h2>
@@ -179,32 +287,18 @@ export function AddUserForm({
             >
               {roles.map((role) => (
                 <option key={role} value={role}>
-                  {role.replace('_', ' ')}
+                  {role.replace(/_/g, ' ')}
                 </option>
               ))}
             </select>
           </div>
-          {!hideHospitalSelect && ['HOSPITAL_ADMIN', 'DOCTOR', 'NURSE', 'DISPATCHER'].includes(formData.role) && (
+
+          {/* Woreda selector — shown when creating WOREDA_ADMIN for any eligible creator */}
+          {canAssignWoreda && formData.role === 'WOREDA_ADMIN' && (
             <div>
-              <label className="block text-sm font-medium text-gray-700">Hospital</label>
-              <select
-                required
-                value={formData.hospitalId}
-                onChange={(e) => setFormData({ ...formData, hospitalId: e.target.value })}
-                className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm p-2"
-              >
-                <option value="">Select Hospital</option>
-                {hospitals.map((hospital: any) => (
-                  <option key={hospital._id} value={hospital._id?.toString() ?? ''}>
-                    {hospital.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
-          {['WOREDA_ADMIN', 'HOSPITAL_ADMIN'].includes(formData.role) && (
-            <div>
-              <label className="block text-sm font-medium text-gray-700">Woreda</label>
+              <label className="block text-sm font-medium text-gray-700">
+                Woreda <span className="text-red-500">*</span>
+              </label>
               <select
                 required
                 value={formData.woredaId}
@@ -212,14 +306,74 @@ export function AddUserForm({
                 className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm p-2"
               >
                 <option value="">Select Woreda</option>
-                {woredas.map((woreda: any) => (
-                  <option key={woreda._id} value={woreda._id?.toString() ?? ''}>
-                    {woreda.name}
+                {woredas.map((w: any) => (
+                  <option key={w._id} value={w._id?.toString() ?? ''}>
+                    {w.name}{w.city ? ` — ${w.city}` : ''}{w.region ? ` (${w.region})` : ''}
                   </option>
                 ))}
               </select>
+              {formData.woredaId && (
+                <p className="text-xs text-green-600 mt-1">
+                  ✓ Woreda assigned
+                </p>
+              )}
+              {!formData.woredaId && (
+                <p className="text-xs text-gray-400 mt-1">
+                  A Woreda Admin must be assigned to exactly one woreda.
+                </p>
+              )}
             </div>
           )}
+
+          {/* Facility selectors — only for SUPER_ADMIN creating hospital-scoped roles */}
+          {isSuperAdmin && HOSPITAL_SCOPED_ROLES.includes(formData.role) && (
+            <>
+              <div>
+                <label className="block text-sm font-medium text-gray-700">Woreda</label>
+                <select
+                  value={formData.woredaId}
+                  onChange={(e) => handleWoredaChange(e.target.value)}
+                  className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm p-2"
+                >
+                  <option value="">Select Woreda</option>
+                  {woredas.map((w: any) => (
+                    <option key={w._id} value={w._id?.toString() ?? ''}>{w.name}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700">
+                  {isHealthCenterAdminRole ? 'Health Center' : 'Hospital'}
+                </label>
+                <select
+                  required
+                  value={formData.hospitalId}
+                  onChange={(e) => handleHospitalChange(e.target.value)}
+                  className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm p-2"
+                >
+                  <option value="">
+                    {formData.woredaId ? 'Select facility' : 'Select Woreda first'}
+                  </option>
+                  {facilityOptions.map((h: any) => (
+                    <option key={h._id} value={h._id?.toString() ?? ''}>{h.name}</option>
+                  ))}
+                </select>
+                {formData.hospitalId && formData.woredaId && (
+                  <p className="text-xs text-green-600 mt-1">Woreda auto-assigned from hospital location</p>
+                )}
+              </div>
+            </>
+          )}
+
+          {/* Info note for facility admins */}
+          {!isSuperAdmin && isFacilityAdmin && HOSPITAL_SCOPED_ROLES.includes(formData.role) && (
+            <div className="p-3 bg-blue-50 border border-blue-200 rounded-md">
+              <p className="text-sm text-blue-700">
+                🏥 Facility and woreda will be automatically assigned to your facility.
+              </p>
+            </div>
+          )}
+
           <div>
             <label className="block text-sm font-medium text-gray-700">Phone Number</label>
             <input
@@ -229,11 +383,12 @@ export function AddUserForm({
               className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm p-2"
             />
           </div>
-          <div className="flex flex-col sm:flex-row sm:justify-end sm:items-center sm:gap-2">
+
+          <div className="flex flex-col sm:flex-row sm:justify-end sm:items-center gap-2">
             <button
               type="button"
               onClick={onClose}
-              className="px-4 py-2 text-gray-600 border border-gray-300 rounded-md hover:bg-gray-50"
+              className="w-full sm:w-auto px-4 py-2 text-gray-600 border border-gray-300 rounded-md hover:bg-gray-50"
             >
               Cancel
             </button>
@@ -255,7 +410,7 @@ export function AddUserForm({
                     setLoading(false);
                   }
                 }}
-                className="px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700 disabled:opacity-50"
+                className="w-full sm:w-auto px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700 disabled:opacity-50"
               >
                 Delete User
               </button>
@@ -263,9 +418,11 @@ export function AddUserForm({
             <button
               type="submit"
               disabled={loading}
-              className="px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 disabled:opacity-50"
+              className="w-full sm:w-auto px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 disabled:opacity-50"
             >
-              {loading ? (userToEdit ? 'Saving...' : 'Creating...') : userToEdit ? 'Save Changes' : 'Create User'}
+              {loading
+                ? userToEdit ? 'Saving...' : 'Creating...'
+                : userToEdit ? 'Save Changes' : 'Create User'}
             </button>
           </div>
         </form>

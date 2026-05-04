@@ -6,12 +6,14 @@ import { User, AuthState, LoginCredentials, RegisterCredentials } from '@/types/
 const getDashboardForRole = (role: string): string => {
   switch (role) {
     case 'SUPER_ADMIN':
-    case 'MOH_ADMIN':
-      return '/moh-dashboard';
     case 'SYSTEM_ADMIN':
       return '/system-dashboard';
+    case 'MOH_ADMIN':
+      return '/moh-dashboard';
     case 'HOSPITAL_ADMIN':
       return '/hospital-dashboard';
+    case 'HEALTH_CENTER_ADMIN':
+      return '/health-center-dashboard';
     case 'DOCTOR':
     case 'NURSE':
     case 'MIDWIFE':
@@ -119,6 +121,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         role: data.user.role,
         hospitalId: data.user.hospitalId ? String(data.user.hospitalId) : undefined,
         woredaId: data.user.woredaId ? String(data.user.woredaId) : undefined,
+        assignedRegion: data.user.assignedRegion ?? undefined,
+        phoneNumber: data.user.phoneNumber ?? undefined,
       };
 
       // Store both user and access token from API response
