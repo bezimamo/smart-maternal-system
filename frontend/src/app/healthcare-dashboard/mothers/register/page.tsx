@@ -180,9 +180,21 @@ export default function RegisterMother() {
               setFormData(prev => ({ ...prev, region: userWoreda.region }));
             }
           } catch { /* silent */ }
-        } else if (currentUser.regionId) {
-          setFormData(prev => ({ ...prev, region: currentUser.regionId }));
+        } else if (currentUser.regionId || currentUser.assignedRegion || currentUser.region) {
+          setFormData(prev => ({ ...prev, region: currentUser.regionId || currentUser.assignedRegion || currentUser.region }));
         }
+
+        // Universal region fallback: if the hospital/woreda lookup fails to find a region, 
+        // fall back directly to the region assigned to the user's profile
+        setTimeout(() => {
+          setFormData(prev => {
+            if (!prev.region) {
+              const fallback = currentUser.assignedRegion || currentUser.region || currentUser.regionId;
+              if (fallback) return { ...prev, region: fallback };
+            }
+            return prev;
+          });
+        }, 100);
       } catch (err) {
         console.error('Error in auto-assignment:', err);
       }
